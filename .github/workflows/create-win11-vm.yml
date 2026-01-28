@@ -1,0 +1,75 @@
+name: Create a Windows 11 VM in México
+on:
+  workflow_dispatch:
+    inputs:
+      sourceRdpIP:
+        description: 'Your Public IP (or * for any)'
+        required: true
+        default: '1.145.222.180'
+      vmSize:
+        description: 'VM Size'
+        required: false
+        default: 'Standard_D4s_v3'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Create VM
+        run: |
+          echo "Creating VM: ${{ secrets.AZURE_VM_NAME }}"
+          
+          az deployment group create \
+            --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+            --template-file ./infra/win11-vm.bicep \
+            --name "deploy-$(date +%Y%m%d-%H%M%S)" \
+            --parameters \
+              vmName="${{ secrets.AZURE_VM_NAME }}" \
+              location="${{ secrets.AZURE_LOCATION }}" \
+              adminUsername="${{ secrets.AZURE_ADMIN_USERNAME }}" \
+              adminPassword="${{ secrets.AZURE_ADMIN_PASSWORD }}" \
+              dnsName="${{ secrets.AZURE_DNS_NAME }}" \
+              existingVnetName="${{ secrets.AZURE_VNET_NAME }}" \
+              existingSubnetName="${{ secrets.AZURE_SUBNET_NAME }}" \
+              sourceRdpIP="${{ github.event.inputs.sourceRdpIP }}" \
+              vmSize="${{ github.event.inputs.vmSize }}"
+
+      - name: Get Connection Info
+        run: |
+          FQDN=$(az network public-ip show \
+            --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+            --name "${{ secrets.AZURE_VM_NAME }}-pip" \
+            --query dnsSettings.fqdn -o tsv)
+          
+          echo "========================================"
+          echo "✅ THE WINDOWS 11 VM HAS BEEN CREATED!"
+          echo "========================================"
+          echo "Connect via RDP:"
+          echo "mstsc /v:$FQDN"
+          echo ""
+          echo "Username: ${{ secrets.AZURE_ADMIN_USERNAME }}"
+          echo "Password: (from GitHub Secrets)"
+          echo "========================================"
+          
+          # Create RDP file
+          cat > win11.rdp << EOF
+          full address:s:$FQDN
+          username:s:${{ secrets.AZURE_ADMIN_USERNAME }}
+          EOF
+
+      - name: Upload RDP File
+        uses: actions/upload-artifact@v4
+        with:
+          name: rdp-connection
+          path: win11.rdp
