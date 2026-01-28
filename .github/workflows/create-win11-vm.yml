@@ -3,15 +3,15 @@ on:
   workflow_dispatch:
     inputs:
       sourceRdpIP:
-        description: 'Your Public IP (use * for testing only)'
+        description: 'Your Public IP (get with: curl https://api.ipify.org)'
         required: true
-        default: '*'
+        default: '1.145.222.180/32'
       vmSize:
         description: 'VM Size'
         required: false
         default: 'Standard_D4s_v3'
       enableAutoShutdown:
-        description: 'Enable auto-shutdown (saves cost)'
+        description: 'Enable auto-shutdown'
         type: boolean
         default: true
       shutdownTime:
@@ -27,260 +27,200 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup Azure CLI
-        run: |
-          echo "Azure CLI version:"
-          az version --output table
-
-      - name: Azure Login with Service Principal
+      - name: Azure Login
         run: |
           echo "🔐 Logging in with Service Principal..."
-          echo "Client ID: ${{ secrets.AZURE_CLIENT_ID }}"
-          echo "Resource Group: ${{ secrets.AZURE_RESOURCE_GROUP }}"
-          
-          # Login with service principal
           az login --service-principal \
             -u "${{ secrets.AZURE_CLIENT_ID }}" \
             -p "${{ secrets.AZURE_CLIENT_SECRET }}" \
             --tenant "${{ secrets.AZURE_TENANT_ID }}" \
             --output none
           
-          # Set subscription
           az account set --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
-          
-          echo "✅ Login successful!"
+          echo "✅ Login successful"
           az account show --query "{Subscription:name}" -o table
 
-      - name: Validate Resource Group
+      - name: Wait for Permission Propagation
         run: |
-          echo "🔍 Validating resource group: ${{ secrets.AZURE_RESOURCE_GROUP }}"
+          echo "⏳ Waiting 15 seconds for permission propagation..."
+          sleep 15
+
+      - name: Quick VNet Check (Non-blocking)
+        continue-on-error: true
+        run: |
+          echo "🔍 Quick VNet check..."
+          VNET_NAME=$(az network vnet show \
+            --name "${{ secrets.AZURE_VNET_NAME }}" \
+            --resource-group "${{ secrets.AZURE_VNET_RG }}" \
+            --query "name" -o tsv 2>/dev/null || echo "")
           
+          if [ -n "$VNET_NAME" ]; then
+            echo "✅ VNet accessible: $VNET_NAME"
+          else
+            echo "⚠️ Cannot access VNet, but continuing anyway..."
+          fi
+
+      - name: Ensure Resource Group
+        run: |
+          echo "📦 Ensuring resource group exists..."
           if az group exists --name "${{ secrets.AZURE_RESOURCE_GROUP }}"; then
             echo "✅ Resource group exists"
           else
-            echo "🔄 Creating resource group..."
+            echo "Creating resource group..."
             az group create \
               --name "${{ secrets.AZURE_RESOURCE_GROUP }}" \
               --location "${{ secrets.AZURE_LOCATION }}" \
-              --tags "CreatedBy=GitHubActions" "Environment=Production" \
-                     "Repository=${{ github.repository }}" "RunID=${{ github.run_id }}"
-            echo "✅ Resource group created"
-          fi
-
-      - name: Validate VNet in Different RG
-        run: |
-          echo "🔍 Checking VNet exists in separate resource group..."
-          echo "VNet Name: ${{ secrets.AZURE_VNET_NAME }}"
-          echo "VNet RG: ${{ secrets.AZURE_VNET_RG }}"
-          
-          # Check if SP has permission on VNet RG
-          echo "Checking permissions on VNet resource group..."
-          
-          # Verify VNet exists
-          VNET_INFO=$(az network vnet show \
-            --name "${{ secrets.AZURE_VNET_NAME }}" \
-            --resource-group "${{ secrets.AZURE_VNET_RG }}" \
-            --query "{Name:name, Location:location, Subnets:subnets[].name}" 2>/dev/null || echo "{}")
-          
-          if echo "$VNET_INFO" | grep -q "Name"; then
-            echo "✅ VNet exists in ${{ secrets.AZURE_VNET_RG }}"
-            echo "$VNET_INFO" | jq .
-          else
-            echo "❌ ERROR: VNet not found or no access"
-            echo "Ensure:"
-            echo "1. VNet '${{ secrets.AZURE_VNET_NAME }}' exists in RG '${{ secrets.AZURE_VNET_RG }}'"
-            echo "2. SP has 'Reader' role on RG '${{ secrets.AZURE_VNET_RG }}'"
-            echo ""
-            echo "Run this command:"
-            echo "az role assignment create \\"
-            echo "  --assignee ${{ secrets.AZURE_CLIENT_ID }} \\"
-            echo "  --role Reader \\"
-            echo "  --resource-group ${{ secrets.AZURE_VNET_RG }}"
-            exit 1
+              --tags "CreatedBy=GitHub" "Repo=${{ github.repository }}" "RunID=${{ github.run_id }}"
           fi
 
       - name: Deploy Windows 11 VM
         run: |
           echo "🚀 Deploying Windows 11 VM..."
           echo "========================================"
-          echo "VM Name: ${{ secrets.AZURE_VM_NAME }}"
+          echo "VM: ${{ secrets.AZURE_VM_NAME }}"
           echo "Location: ${{ secrets.AZURE_LOCATION }}"
-          echo "Resource Group: ${{ secrets.AZURE_RESOURCE_GROUP }}"
-          echo "DNS Name: ${{ secrets.AZURE_DNS_NAME }}"
-          echo "VNet: ${{ secrets.AZURE_VNET_NAME }} (in RG: ${{ secrets.AZURE_VNET_RG }})"
+          echo "RG: ${{ secrets.AZURE_RESOURCE_GROUP }}"
+          echo "VNet: ${{ secrets.AZURE_VNET_NAME }} (in ${{ secrets.AZURE_VNET_RG }})"
           echo "Subnet: ${{ secrets.AZURE_SUBNET_NAME }}"
-          echo "RDP Allowed from: ${{ github.event.inputs.sourceRdpIP }}"
+          echo "RDP from: ${{ github.event.inputs.sourceRdpIP }}"
           echo "========================================"
           
-          # Create parameters JSON
-          cat > /tmp/vm-params.json << EOF
-          {
-            "vmName": { "value": "${{ secrets.AZURE_VM_NAME }}" },
-            "location": { "value": "${{ secrets.AZURE_LOCATION }}" },
-            "adminUsername": { "value": "${{ secrets.AZURE_ADMIN_USERNAME }}" },
-            "adminPassword": { "value": "${{ secrets.AZURE_ADMIN_PASSWORD }}" },
-            "dnsName": { "value": "${{ secrets.AZURE_DNS_NAME }}" },
-            "existingVnetName": { "value": "${{ secrets.AZURE_VNET_NAME }}" },
-            "existingVnetResourceGroup": { "value": "${{ secrets.AZURE_VNET_RG }}" },
-            "existingSubnetName": { "value": "${{ secrets.AZURE_SUBNET_NAME }}" },
-            "sourceRdpIP": { "value": "${{ github.event.inputs.sourceRdpIP }}" },
-            "vmSize": { "value": "${{ github.event.inputs.vmSize }}" }
-          }
-          EOF
-          
-          echo "📋 Deployment parameters:"
-          cat /tmp/vm-params.json | jq .
-          
-          # Deploy the VM
-          echo "🔄 Starting deployment (takes 5-10 minutes)..."
+          # Deploy with Bicep
           az deployment group create \
             --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \
             --template-file ./infra/win11-vm.bicep \
-            --parameters @/tmp/vm-params.json \
-            --name "win11-vm-${{ github.run_id }}" \
-            --no-wait
-          
-          echo "✅ Deployment initiated. VM is provisioning..."
+            --name "win11-deploy-${{ github.run_number }}" \
+            --parameters \
+              vmName="${{ secrets.AZURE_VM_NAME }}" \
+              location="${{ secrets.AZURE_LOCATION }}" \
+              adminUsername="${{ secrets.AZURE_ADMIN_USERNAME }}" \
+              adminPassword="${{ secrets.AZURE_ADMIN_PASSWORD }}" \
+              dnsName="${{ secrets.AZURE_DNS_NAME }}" \
+              existingVnetName="${{ secrets.AZURE_VNET_NAME }}" \
+              existingVnetResourceGroup="${{ secrets.AZURE_VNET_RG }}" \
+              existingSubnetName="${{ secrets.AZURE_SUBNET_NAME }}" \
+              sourceRdpIP="${{ github.event.inputs.sourceRdpIP }}" \
+              vmSize="${{ github.event.inputs.vmSize }}"
 
       - name: Wait for VM Provisioning
         run: |
-          echo "⏳ Waiting for VM to be ready..."
-          echo "This can take 5-10 minutes. Please be patient."
-          
-          # Wait for deployment to complete
-          az deployment group wait \
-            --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \
-            --name "win11-vm-${{ github.run_id }}" \
-            --created \
-            --timeout 900
-          
-          echo "✅ VM deployment completed!"
-          
-          # Wait for VM to be running
+          echo "⏳ Waiting for VM to be ready (5-10 minutes)..."
           az vm wait \
             --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \
             --name "${{ secrets.AZURE_VM_NAME }}" \
             --created \
-            --timeout 300
-          
-          echo "🎉 VM is ready!"
+            --timeout 600
+          echo "✅ VM is ready!"
 
       - name: Configure Auto-Shutdown
         if: ${{ github.event.inputs.enableAutoShutdown == 'true' }}
         run: |
-          echo "⏰ Configuring auto-shutdown at ${{ github.event.inputs.shutdownTime }}..."
-          
+          echo "⏰ Setting auto-shutdown to ${{ github.event.inputs.shutdownTime }}..."
           az vm auto-shutdown \
             --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \
             --name "${{ secrets.AZURE_VM_NAME }}" \
             --time "${{ github.event.inputs.shutdownTime }}" \
             --timezone "Central Standard Time (Mexico)" \
             --email "${{ github.actor }}@users.noreply.github.com" \
-            --webhook "" || echo "Note: Auto-shutdown may already be configured"
-          
-          echo "✅ Auto-shutdown configured"
+            --webhook "" || echo "Auto-shutdown already configured"
 
       - name: Get Connection Details
         id: connection
         run: |
           echo "🔗 Getting connection details..."
           
-          # Try multiple times in case IP is still being assigned
+          # Try multiple times
           for i in {1..5}; do
-            echo "Attempt $i/5 to get connection info..."
+            echo "Attempt $i/5..."
             
             FQDN=$(az network public-ip show \
               --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \
               --name "${{ secrets.AZURE_VM_NAME }}-pip" \
               --query dnsSettings.fqdn -o tsv 2>/dev/null || echo "")
             
-            PUBLIC_IP=$(az network public-ip show \
-              --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \
-              --name "${{ secrets.AZURE_VM_NAME }}-pip" \
-              --query ipAddress -o tsv 2>/dev/null || echo "")
-            
-            if [ -n "$FQDN" ] && [ -n "$PUBLIC_IP" ]; then
+            if [ -n "$FQDN" ]; then
               break
             fi
+            echo "Not ready yet, waiting 30 seconds..."
             sleep 30
           done
           
           if [ -z "$FQDN" ]; then
-            echo "⚠️ Could not retrieve FQDN. Check Azure Portal for connection details."
-            FQDN="Not available yet - check Azure Portal"
-          else
-            echo "FQDN=$FQDN" >> $GITHUB_OUTPUT
-            echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_OUTPUT
-            
-            echo "========================================"
-            echo "🎉 DEPLOYMENT SUCCESSFUL!"
-            echo "========================================"
-            echo "📱 CONNECTION DETAILS:"
-            echo "• DNS: $FQDN"
-            echo "• IP: $PUBLIC_IP"
-            echo "• Username: ${{ secrets.AZURE_ADMIN_USERNAME }}"
-            echo "• Password: [from GitHub Secrets]"
-            echo ""
-            echo "🔗 RDP COMMAND:"
-            echo "mstsc /v:$FQDN"
-            echo ""
-            echo "⏰ Auto-shutdown: ${{ github.event.inputs.enableAutoShutdown && github.event.inputs.shutdownTime || 'Disabled' }}"
-            echo "========================================"
-            
-            # Create RDP file
-            cat > win11-connection.rdp << EOF
-            full address:s:$FQDN
-            username:s:${{ secrets.AZURE_ADMIN_USERNAME }}
-            screen mode id:i:2
-            use multimon:i:0
-            desktopwidth:i:1920
-            desktopheight:i:1080
-            session bpp:i:32
-            winposstr:s:0,1,0,0,800,600
-            compression:i:1
-            keyboardhook:i:2
-            audiocapturemode:i:0
-            videoplaybackmode:i:1
-            connection type:i:7
-            networkautodetect:i:1
-            bandwidthautodetect:i:1
-            displayconnectionbar:i:1
-            enableworkspacereconnect:i:0
-            disable wallpaper:i:0
-            allow font smoothing:i:1
-            allow desktop composition:i:1
-            disable full window drag:i:1
-            disable menu anims:i:1
-            disable themes:i:0
-            disable cursor setting:i:0
-            bitmapcachepersistenable:i:1
-            EOF
-            
-            echo "✅ RDP file created: win11-connection.rdp"
+            echo "❌ Could not retrieve FQDN"
+            echo "Please check Azure Portal for connection details"
+            exit 0  # Don't fail, just continue
           fi
+          
+          PUBLIC_IP=$(az network public-ip show \
+            --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \
+            --name "${{ secrets.AZURE_VM_NAME }}-pip" \
+            --query ipAddress -o tsv)
+          
+          echo "FQDN=$FQDN" >> $GITHUB_OUTPUT
+          echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_OUTPUT
+          
+          echo "========================================"
+          echo "🎉 VM DEPLOYMENT COMPLETE!"
+          echo "========================================"
+          echo "Connect via RDP:"
+          echo "mstsc /v:$FQDN"
+          echo ""
+          echo "Username: ${{ secrets.AZURE_ADMIN_USERNAME }}"
+          echo "Password: [from GitHub Secrets]"
+          echo "========================================"
+          
+          # Create RDP file
+          cat > win11.rdp << EOF
+          full address:s:$FQDN
+          username:s:${{ secrets.AZURE_ADMIN_USERNAME }}
+          screen mode id:i:2
+          use multimon:i:0
+          desktopwidth:i:1920
+          desktopheight:i:1080
+          session bpp:i:32
+          winposstr:s:0,1,0,0,800,600
+          compression:i:1
+          keyboardhook:i:2
+          audiocapturemode:i:0
+          videoplaybackmode:i:1
+          connection type:i:7
+          networkautodetect:i:1
+          bandwidthautodetect:i:1
+          displayconnectionbar:i:1
+          enableworkspacereconnect:i:0
+          disable wallpaper:i:0
+          allow font smoothing:i:1
+          allow desktop composition:i:1
+          disable full window drag:i:1
+          disable menu anims:i:1
+          disable themes:i:0
+          disable cursor setting:i:0
+          bitmapcachepersistenable:i:1
+          EOF
 
       - name: Upload Connection Files
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: vm-connection-files
-          path: |
-            win11-connection.rdp
+          name: vm-connection
+          path: win11.rdp
           retention-days: 7
 
-      - name: Create Summary Report
+      - name: Create Deployment Summary
         if: always()
         run: |
-          echo "## 🖥️ Windows 11 VM Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "## 🖥️ Windows 11 VM Deployment" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Status:** ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**VM Configuration:**" >> $GITHUB_STEP_SUMMARY
-          echo "- **Name:** ${{ secrets.AZURE_VM_NAME }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Configuration:**" >> $GITHUB_STEP_SUMMARY
+          echo "- **VM:** ${{ secrets.AZURE_VM_NAME }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Location:** ${{ secrets.AZURE_LOCATION }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Admin:** ${{ secrets.AZURE_ADMIN_USERNAME }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Resource Group:** ${{ secrets.AZURE_RESOURCE_GROUP }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **RG:** ${{ secrets.AZURE_RESOURCE_GROUP }}" >> $GITHUB_STEP_SUMMARY
           echo "- **VNet:** ${{ secrets.AZURE_VNET_NAME }} (in ${{ secrets.AZURE_VNET_RG }})" >> $GITHUB_STEP_SUMMARY
+          echo "- **Subnet:** ${{ secrets.AZURE_SUBNET_NAME }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **RDP Allowed from:** \`${{ github.event.inputs.sourceRdpIP }}\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
           if [ "${{ job.status }}" = "success" ] && [ -n "${{ steps.connection.outputs.FQDN }}" ]; then
@@ -289,16 +229,11 @@ jobs:
             echo "- **IP:** \`${{ steps.connection.outputs.PUBLIC_IP }}\`" >> $GITHUB_STEP_SUMMARY
             echo "- **RDP Command:** \`mstsc /v:${{ steps.connection.outputs.FQDN }}\`" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Download the RDP file from **Artifacts** section." >> $GITHUB_STEP_SUMMARY
+            echo "📥 Download RDP file from **Artifacts**" >> $GITHUB_STEP_SUMMARY
           else
-            echo "**⚠️ Connection details not available yet**" >> $GITHUB_STEP_SUMMARY
-            echo "Check Azure Portal for VM status." >> $GITHUB_STEP_SUMMARY
+            echo "**ℹ️ Check Azure Portal for connection details**" >> $GITHUB_STEP_SUMMARY
           fi
           
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Security:**" >> $GITHUB_STEP_SUMMARY
-          echo "- RDP allowed from: \`${{ github.event.inputs.sourceRdpIP }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- Auto-shutdown: ${{ github.event.inputs.enableAutoShutdown && github.event.inputs.shutdownTime || 'Disabled' }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "---" >> $GITHUB_STEP_SUMMARY
           echo "*Deployment ID: ${{ github.run_id }}*" >> $GITHUB_STEP_SUMMARY

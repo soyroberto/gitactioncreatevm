@@ -24,11 +24,15 @@ resource existingSubnet 'Microsoft.Network/virtualNetworks/subnets@2023-05-01' e
 resource publicIP 'Microsoft.Network/publicIPAddresses@2023-05-01' = {
   name: '${vmName}-pip'
   location: location
-  sku: { name: 'Standard' }
+  sku: {
+    name: 'Standard'
+  }
   properties: {
     publicIPAllocationMethod: 'Static'
     publicIPAddressVersion: 'IPv4'
-    dnsSettings: { domainNameLabel: dnsName }
+    dnsSettings: {
+      domainNameLabel: dnsName
+    }
   }
 }
 
@@ -36,17 +40,22 @@ resource networkSecurityGroup 'Microsoft.Network/networkSecurityGroups@2023-05-0
   name: '${vmName}-nsg'
   location: location
   properties: {
-    securityRules: [{
-      name: 'AllowRDP'
-      properties: {
-        priority: 1000
-        protocol: 'Tcp'
-        access: 'Allow'
-        direction: 'Inbound'
-        sourceAddressPrefix: sourceRdpIP
-        destinationPortRange: '3389'
+    securityRules: [
+      {
+        name: 'AllowRDP'
+        properties: {
+          priority: 1000
+          protocol: 'Tcp'
+          access: 'Allow'
+          direction: 'Inbound'
+          sourceAddressPrefix: sourceRdpIP
+          sourcePortRange: '*'
+          destinationAddressPrefix: '*'
+          destinationPortRange: '3389'
+          description: 'Allow RDP access'
+        }
       }
-    }]
+    ]
   }
 }
 
@@ -54,15 +63,23 @@ resource networkInterface 'Microsoft.Network/networkInterfaces@2023-05-01' = {
   name: '${vmName}-nic'
   location: location
   properties: {
-    ipConfigurations: [{
-      name: 'ipconfig1'
-      properties: {
-        privateIPAllocationMethod: 'Dynamic'
-        subnet: { id: existingSubnet.id }
-        publicIPAddress: { id: publicIP.id }
+    ipConfigurations: [
+      {
+        name: 'ipconfig1'
+        properties: {
+          privateIPAllocationMethod: 'Dynamic'
+          subnet: {
+            id: existingSubnet.id
+          }
+          publicIPAddress: {
+            id: publicIP.id
+          }
+        }
       }
-    }]
-    networkSecurityGroup: { id: networkSecurityGroup.id }
+    ]
+    networkSecurityGroup: {
+      id: networkSecurityGroup.id
+    }
   }
 }
 
@@ -70,7 +87,9 @@ resource virtualMachine 'Microsoft.Compute/virtualMachines@2023-03-01' = {
   name: vmName
   location: location
   properties: {
-    hardwareProfile: { vmSize: vmSize }
+    hardwareProfile: {
+      vmSize: vmSize
+    }
     storageProfile: {
       imageReference: {
         publisher: 'MicrosoftWindowsDesktop'
@@ -82,9 +101,22 @@ resource virtualMachine 'Microsoft.Compute/virtualMachines@2023-03-01' = {
         createOption: 'FromImage'
         name: '${vmName}-osdisk'
         diskSizeGB: 128
-        managedDisk: { storageAccountType: 'Premium_LRS' }
+        managedDisk: {
+          storageAccountType: 'Premium_LRS'
+        }
         caching: 'ReadWrite'
       }
+      dataDisks: [
+        {
+          createOption: 'Empty'
+          lun: 0
+          diskSizeGB: 256
+          managedDisk: {
+            storageAccountType: 'Premium_LRS'
+          }
+          name: '${vmName}-datadisk1'
+        }
+      ]
     }
     osProfile: {
       computerName: vmName
@@ -97,11 +129,34 @@ resource virtualMachine 'Microsoft.Compute/virtualMachines@2023-03-01' = {
       }
     }
     networkProfile: {
-      networkInterfaces: [{ id: networkInterface.id }]
+      networkInterfaces: [
+        {
+          id: networkInterface.id
+        }
+      ]
     }
     licenseType: 'Windows_Client'
   }
 }
 
+resource autoShutdown 'Microsoft.DevTestLab/schedules@2018-09-15' = {
+  name: 'shutdown-computevm-${vmName}'
+  location: location
+  properties: {
+    status: 'Enabled'
+    taskType: 'ComputeVmShutdownTask'
+    dailyRecurrence: {
+      time: '20:00'
+    }
+    timeZoneId: 'Central Standard Time (Mexico)'
+    targetResourceId: virtualMachine.id
+    notificationSettings: {
+      status: 'Disabled'
+    }
+  }
+}
+
+output vmName string = virtualMachine.name
+output publicIPAddress string = publicIP.properties.ipAddress
 output fqdn string = publicIP.properties.dnsSettings.fqdn
-output publicIP string = publicIP.properties.ipAddress
+output rdpCommand string = 'mstsc /v:${publicIP.properties.ipAddress}'
