@@ -3,18 +3,13 @@ on:
   workflow_dispatch:
     inputs:
       sourceRdpIP:
-        description: 'Your Public IP (use curl https://api.ipify.org)'
+        description: 'Your Public IP'
         required: true
-        default: '*'  # ⚠️ Change to YOUR IP for security!
+        default: '*'
       vmSize:
         description: 'VM Size'
         required: false
         default: 'Standard_D4s_v3'
-
-# ⚠️ REMOVE or COMMENT OUT any 'permissions:' block if present
-# permissions:
-#   id-token: write  # ❌ This causes OIDC error
-#   contents: read
 
 jobs:
   deploy:
@@ -24,179 +19,126 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Azure Login with Client Secret
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}          # Should be: 4fc8ad96-2264-4827-bf8e-7b5301e18ea7
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}  # ✅ CRITICAL: Add this line!
-
-      - name: Verify Login Success
+      - name: Setup Azure CLI
         run: |
-          echo "Testing Azure connection..."
-          az account show --query "{Subscription:name, User:user.name}" -o table
-          echo "✅ Azure login successful!"
+          # Ensure Azure CLI is available
+          az version || echo "Azure CLI already installed"
+
+      - name: Azure Login with Service Principal
+        run: |
+          echo "Logging in with Service Principal..."
+          az login --service-principal \
+            -u "${{ secrets.AZURE_CLIENT_ID }}" \
+            -p "${{ secrets.AZURE_CLIENT_SECRET }}" \
+            --tenant "${{ secrets.AZURE_TENANT_ID }}"
+          
+          echo "Setting subscription..."
+          az account set --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+          
+          echo "✅ Login successful!"
+          az account show --query "{Subscription:name}" -o table
+
+      - name: Check Resource Group
+        run: |
+          echo "Checking resource group: ${{ secrets.AZURE_RESOURCE_GROUP }}"
+          if az group exists --name "${{ secrets.AZURE_RESOURCE_GROUP }}"; then
+            echo "✅ Resource group exists"
+          else
+            echo "Creating resource group..."
+            az group create \
+              --name "${{ secrets.AZURE_RESOURCE_GROUP }}" \
+              --location "${{ secrets.AZURE_LOCATION }}" \
+              --tags "CreatedBy=GitHub" "Repo=${{ github.repository }}"
+          fi
 
       - name: Check VNet Exists
         run: |
-          echo "Checking if VNet '${{ secrets.AZURE_VNET_NAME }}' exists..."
-          az network vnet show \
-            --name "${{ secrets.AZURE_VNET_NAME }}" \
+          echo "Checking VNet: ${{ secrets.AZURE_VNET_NAME }}"
+          VNET_EXISTS=$(az network vnet list \
             --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \
-            --query "{Name:name, Location:location, Subnets:subnets[].name}" || {
-              echo "❌ VNet not found!"
-              echo "Create it first with:"
-              echo "az network vnet create \\"
-              echo "  --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \\"
-              echo "  --name ${{ secrets.AZURE_VNET_NAME }} \\"
-              echo "  --address-prefix 10.0.0.0/16 \\"
-              echo "  --subnet-name ${{ secrets.AZURE_SUBNET_NAME }} \\"
-              echo "  --subnet-prefix 10.0.0.0/24 \\"
-              echo "  --location ${{ secrets.AZURE_LOCATION }}"
-              exit 1
-            }
-          echo "✅ VNet exists!"
+            --query "[?name=='${{ secrets.AZURE_VNET_NAME }}'] | length(@)")
+          
+          if [ "$VNET_EXISTS" -eq 1 ]; then
+            echo "✅ VNet exists"
+          else
+            echo "❌ VNet not found. Please create it first:"
+            echo "az network vnet create \\"
+            echo "  --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \\"
+            echo "  --name ${{ secrets.AZURE_VNET_NAME }} \\"
+            echo "  --address-prefix 10.0.0.0/16 \\"
+            echo "  --subnet-name ${{ secrets.AZURE_SUBNET_NAME }} \\"
+            echo "  --subnet-prefix 10.0.0.0/24 \\"
+            echo "  --location ${{ secrets.AZURE_LOCATION }}"
+            exit 1
+          fi
 
-      - name: Deploy Windows 11 VM
+      - name: Deploy VM with Bicep
         run: |
           echo "🚀 Deploying Windows 11 VM..."
-          echo "VM Name: ${{ secrets.AZURE_VM_NAME }}"
-          echo "Location: ${{ secrets.AZURE_LOCATION }}"
-          echo "Resource Group: ${{ secrets.AZURE_RESOURCE_GROUP }}"
           
-          # Deploy using Bicep
+          # Create parameters file dynamically
+          cat > /tmp/vm-params.json << EOF
+          {
+            "vmName": { "value": "${{ secrets.AZURE_VM_NAME }}" },
+            "location": { "value": "${{ secrets.AZURE_LOCATION }}" },
+            "adminUsername": { "value": "${{ secrets.AZURE_ADMIN_USERNAME }}" },
+            "adminPassword": { "value": "${{ secrets.AZURE_ADMIN_PASSWORD }}" },
+            "dnsName": { "value": "${{ secrets.AZURE_DNS_NAME }}" },
+            "existingVnetName": { "value": "${{ secrets.AZURE_VNET_NAME }}" },
+            "existingSubnetName": { "value": "${{ secrets.AZURE_SUBNET_NAME }}" },
+            "sourceRdpIP": { "value": "${{ github.event.inputs.sourceRdpIP }}" },
+            "vmSize": { "value": "${{ github.event.inputs.vmSize }}" }
+          }
+          EOF
+          
+          echo "Deployment parameters:"
+          cat /tmp/vm-params.json
+          
+          # Deploy the VM
           az deployment group create \
             --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \
             --template-file ./infra/win11-vm.bicep \
-            --name "deploy-$(date +%Y%m%d-%H%M%S)-${{ github.run_id }}" \
-            --parameters \
-              vmName="${{ secrets.AZURE_VM_NAME }}" \
-              location="${{ secrets.AZURE_LOCATION }}" \
-              adminUsername="${{ secrets.AZURE_ADMIN_USERNAME }}" \
-              adminPassword="${{ secrets.AZURE_ADMIN_PASSWORD }}" \
-              dnsName="${{ secrets.AZURE_DNS_NAME }}" \
-              existingVnetName="${{ secrets.AZURE_VNET_NAME }}" \
-              existingSubnetName="${{ secrets.AZURE_SUBNET_NAME }}" \
-              sourceRdpIP="${{ github.event.inputs.sourceRdpIP }}" \
-              vmSize="${{ github.event.inputs.vmSize }}" \
-            --verbose
+            --parameters @/tmp/vm-params.json \
+            --name "win11-deploy-${{ github.run_number }}"
 
-      - name: Wait for VM Provisioning
+      - name: Wait for VM
         run: |
-          echo "⏳ Waiting for VM to be ready (this takes 5-10 minutes)..."
+          echo "⏳ Waiting for VM to be ready..."
           az vm wait \
             --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \
             --name "${{ secrets.AZURE_VM_NAME }}" \
             --created \
-            --timeout 900  # 15 minutes timeout
+            --timeout 600
           echo "✅ VM is ready!"
 
-      - name: Get Connection Details
-        id: get-details
+      - name: Get Connection Info
+        id: get-connection
         run: |
-          # Get Public IP and FQDN
-          PUBLIC_IP=$(az network public-ip show \
-            --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \
-            --name "${{ secrets.AZURE_VM_NAME }}-pip" \
-            --query ipAddress -o tsv)
-          
+          # Get FQDN
           FQDN=$(az network public-ip show \
             --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \
             --name "${{ secrets.AZURE_VM_NAME }}-pip" \
-            --query dnsSettings.fqdn -o tsv)
+            --query dnsSettings.fqdn -o tsv 2>/dev/null || echo "")
           
-          echo "FQDN=$FQDN" >> $GITHUB_OUTPUT
-          echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_OUTPUT
-          
-          echo "========================================"
-          echo "🎉 WINDOWS 11 VM DEPLOYMENT SUCCESSFUL!"
-          echo "========================================"
-          echo "📱 Connection Details:"
-          echo "• DNS: $FQDN"
-          echo "• IP: $PUBLIC_IP"
-          echo "• Username: ${{ secrets.AZURE_ADMIN_USERNAME }}"
-          echo "• Password: [from GitHub Secrets]"
-          echo ""
-          echo "🔗 RDP Connection:"
-          echo "mstsc /v:$FQDN"
-          echo "or"
-          echo "mstsc /v:$PUBLIC_IP"
-          echo ""
-          echo "📝 Create RDP file..."
-          cat > win11-connection.rdp << EOF
-          full address:s:$FQDN
-          username:s:${{ secrets.AZURE_ADMIN_USERNAME }}
-          screen mode id:i:2
-          use multimon:i:0
-          desktopwidth:i:1920
-          desktopheight:i:1080
-          session bpp:i:32
-          winposstr:s:0,1,0,0,800,600
-          compression:i:1
-          keyboardhook:i:2
-          audiocapturemode:i:0
-          videoplaybackmode:i:1
-          connection type:i:7
-          networkautodetect:i:1
-          bandwidthautodetect:i:1
-          displayconnectionbar:i:1
-          enableworkspacereconnect:i:0
-          disable wallpaper:i:0
-          allow font smoothing:i:1
-          allow desktop composition:i:1
-          disable full window drag:i:1
-          disable menu anims:i:1
-          disable themes:i:0
-          disable cursor setting:i:0
-          bitmapcachepersistenable:i:1
-          EOF
-          echo "✅ RDP file created: win11-connection.rdp"
+          if [ -n "$FQDN" ]; then
+            echo "FQDN=$FQDN" >> $GITHUB_OUTPUT
+            echo "✅ Connection Details:"
+            echo "   DNS: $FQDN"
+            echo "   User: ${{ secrets.AZURE_ADMIN_USERNAME }}"
+            
+            # Create RDP file
+            cat > win11.rdp << EOF
+            full address:s:$FQDN
+            username:s:${{ secrets.AZURE_ADMIN_USERNAME }}
+            EOF
+          else
+            echo "⚠️  Could not retrieve FQDN. Check Azure Portal."
+          fi
 
-      - name: Upload RDP Connection File
+      - name: Upload RDP File
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: rdp-connection-files
-          path: |
-            win11-connection.rdp
+          name: vm-connection
+          path: win11.rdp
           retention-days: 7
-
-      - name: Create Connection Instructions
-        run: |
-          cat > CONNECTION_INSTRUCTIONS.md << EOF
-          # 🔐 Windows 11 VM Connection Instructions
-          
-          ## Your VM Details:
-          - **VM Name**: ${{ secrets.AZURE_VM_NAME }}
-          - **Admin User**: ${{ secrets.AZURE_ADMIN_USERNAME }}
-          - **Location**: ${{ secrets.AZURE_LOCATION }}
-          - **DNS**: ${{ steps.get-details.outputs.FQDN }}
-          - **Public IP**: ${{ steps.get-details.outputs.PUBLIC_IP }}
-          
-          ## How to Connect:
-          1. **Download** the \`win11-connection.rdp\` file from Artifacts
-          2. **Double-click** the RDP file
-          3. When prompted for credentials:
-             - Username: \`${{ secrets.AZURE_ADMIN_USERNAME }}\`
-             - Password: Use from GitHub Secrets
-          4. Click "Connect"
-          
-          ## Alternative Connection:
-          Open Remote Desktop Connection and enter:
-          \`\`\`
-          ${{ steps.get-details.outputs.FQDN }}
-          \`\`\`
-          
-          ## Security Notes:
-          - RDP is restricted to: ${{ github.event.inputs.sourceRdpIP }}
-          - Change password after first login
-          - Enable Windows Updates
-          
-          **Deployed by**: GitHub Actions
-          **Run ID**: ${{ github.run_id }}
-          **Timestamp**: $(date)
-          EOF
-
-    outputs:
-      vm_fqdn: ${{ steps.get-details.outputs.FQDN }}
-      vm_ip: ${{ steps.get-details.outputs.PUBLIC_IP }}
