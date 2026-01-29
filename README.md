@@ -103,4 +103,39 @@ Created by **Roberto** ([@soyroberto](https://github.com/soyroberto))
 
 ## License
 
-This project is open source and available for use and modification.
+This project uses a dual licensing model:
+
+📝 Code & Documentation (Open Source)
+
+All code and written content are FREE TO USE AND MODIFY.
+
+You can freely use, modify, and distribute the code for any purpose.
+
+🎨 Images & Visual Assets (All Rights Reserved)
+
+All images and infographics are for EXCLUSIVE USE by Roberto Lopez C. (@soyroberto) ONLY.
+
+This includes all files in client/public/images/ directory:
+
+• ❌ 01_github_actions_overview.png
+
+• ❌ 02_yml_bicep_workflow.png
+
+• ❌ 03_automation_power.png
+
+• ❌ 04_secrets_security.png
+
+• ❌ main_infographic_complete.png
+
+• ❌ azure_logo.png
+
+• ❌ bicep_logo.png
+
+• ❌ The "Roberto" character and all visual designs
+
+You may NOT use, copy, modify, or distribute these images without explicit written permission.
+
+For permission requests, contact @soyroberto via GitHub.
+
+See the LICENSE file in the repository root for complete terms.
+
